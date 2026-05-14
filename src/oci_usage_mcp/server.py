@@ -23,10 +23,14 @@ def _get_oci():
         import oci  # noqa: PLC0415
 
         try:
-            _config = oci.config.from_file(
-                file_location=os.environ.get("OCI_CONFIG_FILE"),
-                profile_name=os.environ.get("OCI_PROFILE_NAME"),
-            )
+            config_file = os.environ.get("OCI_CONFIG_FILE")
+            config_profile = os.environ.get("OCI_PROFILE_NAME")
+            kwargs = {}
+            if config_file is not None:
+                kwargs["file_location"] = config_file
+            if config_profile is not None:
+                kwargs["profile_name"] = config_profile
+            _config = oci.config.from_file(**kwargs)
             _usage_client = oci.usage_api.UsageapiClient(_config)
             _search_client = oci.resource_search.ResourceSearchClient(_config)
             _oci = oci
