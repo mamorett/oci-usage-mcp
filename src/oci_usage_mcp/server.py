@@ -68,7 +68,7 @@ def _list_resource_types() -> str:
     oci, config, _, search_client = _get_oci()
     lines: list[str] = [f"{'Resource Type':<50} | Service", "-" * 90]
     try:
-        types_response = search_client.list_resource_types(config["tenancy"])
+        types_response = search_client.list_resource_types()
         for t in sorted(types_response.data, key=lambda x: x.name):
             lines.append(f"{t.name:<50} | {t.service_name}")
     except Exception as e:
@@ -130,6 +130,17 @@ def _fetch_usage_items(
     return all_items, start_date, end_date
 
 
+def _format_resource(item: Any) -> str:
+    """Format a resource identifier: prefer resource_name, fall back to OCID resolution, then resource_id."""
+    if item.resource_name:
+        return item.resource_name
+    if item.resource_id:
+        if item.resource_id.startswith("ocid1."):
+            return _get_resource_name(item.resource_id)
+        return item.resource_id
+    return "—"
+
+
 def _get_usage_report(service_filter: str | None = None, days: int = 30) -> str:
     """
     Fetch cost/usage grouped by compartment, service, and SKU.
@@ -165,8 +176,9 @@ def _get_usage_report_detailed(
     service_filter: str | None = None, days: int = 30
 ) -> str:
     """
-    Fetch cost/usage with per-resource OCID resolution.
-    Slower — performs one Resource Search API call per resource.
+    Fetch cost/usage with per-resource detail.
+    Resource names come directly from the Usage API where available;
+    OCIDs are resolved via Resource Search when needed.
     """
     result = _fetch_usage_items(service_filter, include_resource_id=True, days=days)
     if isinstance(result, str):
@@ -178,18 +190,17 @@ def _get_usage_report_detailed(
 
     lines = [
         f"OCI Usage Report — Detailed  ({start_date.date()} → {end_date.date()})",
-        f"{'Compartment':<30} | {'Service':<30} | {'Cost':>12} | {'Resource Name':<40} | OCID",
-        "-" * 150,
+        f"{'Compartment':<30} | {'Service':<30} | {'Cost':>12} | {'Resource':<50} | {'Resource OCID / ID':<70}",
+        "-" * 200,
     ]
     total_cost = 0.0
     for item in all_items:
         cost = item.computed_amount or 0.0
         total_cost += cost
-        res_name = (
-            _get_resource_name(item.resource_id) if item.resource_id else "N/A"
-        )
+        res_name = _format_resource(item)
+        res_id = item.resource_id or "—"
         lines.append(
-            f"{str(item.compartment_name):<30} | {str(item.service):<30} | {cost:>12.4f} | {res_name:<40} | {item.resource_id}"
+            f"{str(item.compartment_name):<30} | {str(item.service):<30} | {cost:>12.4f} | {res_name:<50} | {res_id:<70}"
         )
 
     currency = all_items[0].currency if all_items else ""
