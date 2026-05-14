@@ -66,11 +66,11 @@ def _get_resource_name(ocid: str) -> str:
 def _list_resource_types() -> str:
     """Return all monitorable resource types as a formatted string."""
     oci, config, _, search_client = _get_oci()
-    lines: list[str] = [f"{'Resource Type':<50} | Service", "-" * 90]
+    lines: list[str] = ["Resource Types", "-" * 50]
     try:
         types_response = search_client.list_resource_types()
         for t in sorted(types_response.data, key=lambda x: x.name):
-            lines.append(f"{t.name:<50} | {t.service_name}")
+            lines.append(t.name)
     except Exception as e:
         lines.append(f"Error fetching resource types: {e}")
     return "\n".join(lines)
@@ -130,15 +130,39 @@ def _fetch_usage_items(
     return all_items, start_date, end_date
 
 
-def _format_resource(item: Any) -> str:
-    """Format a resource identifier: prefer resource_name, fall back to OCID resolution, then resource_id."""
-    if item.resource_name:
-        return item.resource_name
-    if item.resource_id:
-        if item.resource_id.startswith("ocid1."):
-            return _get_resource_name(item.resource_id)
-        return item.resource_id
+def _is_ocid(value: str) -> bool:
+    return value.startswith("ocid1.") or value.startswith("ocid2.")
+
+
+def _resource_display_name(item: Any) -> str:
+    """Best human-readable resource name. Never returns an OCID."""
+    rn = item.resource_name
+    ri = item.resource_id
+
+    if rn and not _is_ocid(rn):
+        return rn
+
+    if ri and not _is_ocid(ri):
+        return ri
+
+    target = None
+    if rn and _is_ocid(rn):
+        target = rn
+    elif ri and _is_ocid(ri):
+        target = ri
+
+    if target:
+        resolved = _get_resource_name(target)
+        if resolved != "N/A":
+            return resolved
+
     return "—"
+
+
+def _resource_id(item: Any) -> str:
+    """Resource OCID if available, otherwise em-dash."""
+    ri = item.resource_id
+    return ri if ri and _is_ocid(ri) else "—"
 
 
 def _get_usage_report(service_filter: str | None = None, days: int = 30) -> str:
@@ -188,19 +212,19 @@ def _get_usage_report_detailed(
     if not all_items:
         return "No data found for the specified period / filter."
 
-    lines = [
+lines = [
         f"OCI Usage Report — Detailed  ({start_date.date()} → {end_date.date()})",
-        f"{'Compartment':<30} | {'Service':<30} | {'Cost':>12} | {'Resource':<50} | {'Resource OCID / ID':<70}",
+        f"{'Compartment':<30} | {'Service':<30} | {'Cost':>12} | {'Resource':<50} | Resource ID",
         "-" * 200,
     ]
     total_cost = 0.0
     for item in all_items:
         cost = item.computed_amount or 0.0
         total_cost += cost
-        res_name = _format_resource(item)
-        res_id = item.resource_id or "—"
+        res_name = _resource_display_name(item)
+        res_id = _resource_id(item)
         lines.append(
-            f"{str(item.compartment_name):<30} | {str(item.service):<30} | {cost:>12.4f} | {res_name:<50} | {res_id:<70}"
+            f"{str(item.compartment_name):<30} | {str(item.service):<30} | {cost:>12.4f} | {res_name:<50} | {res_id}"
         )
 
     currency = all_items[0].currency if all_items else ""
