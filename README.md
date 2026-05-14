@@ -49,7 +49,7 @@ Add the following to your MCP client config (e.g. `claude_desktop_config.json`):
 }
 ```
 
-If your OCI config lives somewhere other than `~/.oci/config`, pass the path via the `OCI_CONFIG_FILE` env var:
+If your OCI config lives somewhere other than `~/.oci/config`, pass the path via the `OCI_CONFIG_FILE` env var. To use a specific profile, set `OCI_PROFILE_NAME`:
 
 ```json
 {
@@ -58,7 +58,8 @@ If your OCI config lives somewhere other than `~/.oci/config`, pass the path via
       "command": "uvx",
       "args": ["oci-usage-mcp"],
       "env": {
-        "OCI_CONFIG_FILE": "/path/to/your/oci/config"
+        "OCI_CONFIG_FILE": "/path/to/your/oci/config",
+        "OCI_PROFILE_NAME": "ADMIN"
       }
     }
   }

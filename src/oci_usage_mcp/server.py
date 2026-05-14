@@ -1,5 +1,6 @@
 """OCI Usage Report MCP Server."""
 
+import os
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -22,7 +23,10 @@ def _get_oci():
         import oci  # noqa: PLC0415
 
         _oci = oci
-        _config = oci.config.from_file()
+        _config = oci.config.from_file(
+            file_location=os.environ.get("OCI_CONFIG_FILE"),
+            profile=os.environ.get("OCI_PROFILE_NAME"),
+        )
         _usage_client = oci.usage_api.UsageapiClient(_config)
         _search_client = oci.resource_search.ResourceSearchClient(_config)
     return _oci, _config, _usage_client, _search_client
