@@ -1,0 +1,23 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "oci-usage-mcp"
+version = "0.1.0"
+description = "MCP server for OCI Usage and Cost reporting"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp[cli]>=1.0.0",
+    "oci>=2.100.0",
+]
+
+[project.scripts]
+oci-usage-mcp = "oci_usage_mcp.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/oci_usage_mcp"]
+
+[tool.hatch.build]
+sources = ["src"]
