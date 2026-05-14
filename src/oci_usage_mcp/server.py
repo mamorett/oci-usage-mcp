@@ -1,5 +1,6 @@
 """OCI Usage Report MCP Server."""
 
+import json
 import os
 from datetime import datetime, timedelta
 from typing import Any
@@ -63,17 +64,31 @@ def _get_resource_name(ocid: str) -> str:
     return "N/A"
 
 
+def _get_resource_ocid(display_name: str) -> str:
+    """Look up an OCID for a given human-readable display name."""
+    try:
+        oci, config, _, search_client = _get_oci()
+        structured_search = oci.resource_search.models.StructuredSearchDetails(
+            query=f"query all resources where displayName = '{display_name}'",
+            type="Structured",
+        )
+        result = search_client.search_resources(structured_search)
+        if result.data.items:
+            return result.data.items[0].identifier
+    except Exception:
+        pass
+    return ""
+
+
 def _list_resource_types() -> str:
-    """Return all monitorable resource types as a formatted string."""
+    """Return all monitorable resource types as a JSON string."""
     oci, config, _, search_client = _get_oci()
-    lines: list[str] = ["Resource Types", "-" * 50]
     try:
         types_response = search_client.list_resource_types()
-        for t in sorted(types_response.data, key=lambda x: x.name):
-            lines.append(t.name)
+        types_list = [t.name for t in sorted(types_response.data, key=lambda x: x.name)]
+        return json.dumps({"resource_types": types_list}, indent=2)
     except Exception as e:
-        lines.append(f"Error fetching resource types: {e}")
-    return "\n".join(lines)
+        return json.dumps({"error": f"Error fetching resource types: {e}"})
 
 
 def _fetch_usage_items(
@@ -134,102 +149,117 @@ def _is_ocid(value: str) -> bool:
     return value.startswith("ocid1.") or value.startswith("ocid2.")
 
 
-def _resource_display_name(item: Any) -> str:
-    """Best human-readable resource name. Never returns an OCID."""
+def _resource_details(item: Any) -> tuple[str, str]:
+    """Returns (display_name, ocid), looking up missing info if necessary."""
     rn = item.resource_name
     ri = item.resource_id
 
-    if rn and not _is_ocid(rn):
-        return rn
+    display_name = ""
+    ocid = ""
 
-    if ri and not _is_ocid(ri):
-        return ri
-
-    target = None
     if rn and _is_ocid(rn):
-        target = rn
+        ocid = rn
     elif ri and _is_ocid(ri):
-        target = ri
+        ocid = ri
 
-    if target:
-        resolved = _get_resource_name(target)
+    if rn and not _is_ocid(rn):
+        display_name = rn
+    elif ri and not _is_ocid(ri):
+        display_name = ri
+
+    if ocid and not display_name:
+        resolved = _get_resource_name(ocid)
         if resolved != "N/A":
-            return resolved
+            display_name = resolved
 
-    return "—"
+    if display_name and not ocid:
+        resolved = _get_resource_ocid(display_name)
+        if resolved:
+            ocid = resolved
 
-
-def _resource_id(item: Any) -> str:
-    """Resource OCID if available, otherwise em-dash."""
-    ri = item.resource_id
-    return ri if ri and _is_ocid(ri) else "—"
+    return display_name or "—", ocid or "—"
 
 
 def _get_usage_report(service_filter: str | None = None, days: int = 30) -> str:
     """
     Fetch cost/usage grouped by compartment, service, and SKU.
-    Fast — no per-resource API calls.
+    Fast — no per-resource API calls. Returns JSON.
     """
     result = _fetch_usage_items(service_filter, include_resource_id=False, days=days)
     if isinstance(result, str):
-        return result
+        return json.dumps({"error": result})
     all_items, start_date, end_date = result
 
     if not all_items:
-        return "No data found for the specified period / filter."
+        return json.dumps({"error": "No data found for the specified period / filter."})
 
-    lines = [
-        f"OCI Usage Report  ({start_date.date()} → {end_date.date()})",
-        f"{'Compartment':<30} | {'Service':<30} | {'Cost':>12} | SKU",
-        "-" * 100,
-    ]
+    report = {
+        "metadata": {
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+            "currency": all_items[0].currency if all_items else "",
+            "total_cost": 0.0,
+        },
+        "items": []
+    }
+
     total_cost = 0.0
     for item in all_items:
         cost = item.computed_amount or 0.0
         total_cost += cost
-        lines.append(
-            f"{str(item.compartment_name):<30} | {str(item.service):<30} | {cost:>12.4f} | {item.sku_name}"
-        )
+        report["items"].append({
+            "compartment_name": str(item.compartment_name),
+            "service": str(item.service),
+            "sku_name": str(item.sku_name),
+            "cost": cost,
+        })
 
-    currency = all_items[0].currency if all_items else ""
-    lines += ["-" * 100, f"TOTAL TENANCY: {total_cost:.4f} {currency}"]
-    return "\n".join(lines)
+    report["metadata"]["total_cost"] = total_cost
+    return json.dumps(report, indent=2)
 
 
 def _get_usage_report_detailed(
     service_filter: str | None = None, days: int = 30
 ) -> str:
     """
-    Fetch cost/usage with per-resource detail.
+    Fetch cost/usage with per-resource detail. Returns JSON.
     Resource names come directly from the Usage API where available;
     OCIDs are resolved via Resource Search when needed.
     """
     result = _fetch_usage_items(service_filter, include_resource_id=True, days=days)
     if isinstance(result, str):
-        return result
+        return json.dumps({"error": result})
     all_items, start_date, end_date = result
 
     if not all_items:
-        return "No data found for the specified period / filter."
+        return json.dumps({"error": "No data found for the specified period / filter."})
 
-    lines = [
-        f"OCI Usage Report — Detailed  ({start_date.date()} → {end_date.date()})",
-        f"{'Compartment':<30} | {'Service':<30} | {'Cost':>12} | {'Resource':<50} | Resource ID",
-        "-" * 200,
-    ]
+    report = {
+        "metadata": {
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+            "currency": all_items[0].currency if all_items else "",
+            "total_cost": 0.0,
+        },
+        "items": []
+    }
+
     total_cost = 0.0
     for item in all_items:
         cost = item.computed_amount or 0.0
         total_cost += cost
-        res_name = _resource_display_name(item)
-        res_id = _resource_id(item)
-        lines.append(
-            f"{str(item.compartment_name):<30} | {str(item.service):<30} | {cost:>12.4f} | {res_name:<50} | {res_id}"
-        )
+        res_name, res_id = _resource_details(item)
+        report["items"].append({
+            "compartment_name": str(item.compartment_name),
+            "service": str(item.service),
+            "sku_name": str(item.sku_name),
+            "resource_name": res_name,
+            "resource_id": res_id,
+            "cost": cost,
+        })
 
-    currency = all_items[0].currency if all_items else ""
-    lines += ["-" * 150, f"TOTAL TENANCY: {total_cost:.4f} {currency}"]
-    return "\n".join(lines)
+    report["metadata"]["total_cost"] = total_cost
+    return json.dumps(report, indent=2)
 
 
 # ---------------------------------------------------------------------------
