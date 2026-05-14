@@ -10,48 +10,47 @@ import mcp.types as types
 from mcp.server import NotificationOptions, Server
 from mcp.server.models import InitializationOptions
 
-# Lazy OCI imports so the server starts even if ~/.oci/config is missing
+# Lazy OCI imports and client cache
 _oci = None
-_config = None
-_usage_client = None
-_search_client = None
+_clients_cache: dict[str, tuple[Any, Any, Any]] = {}
 
 
-def _get_oci():
-    """Lazily initialise OCI clients."""
-    global _oci, _config, _usage_client, _search_client
+def _get_oci(profile_name: str = "DEFAULT"):
+    """Lazily initialise OCI clients for a specific profile."""
+    global _oci
     if _oci is None:
         import oci  # noqa: PLC0415
+        _oci = oci
 
-        try:
-            config_file = os.environ.get("OCI_CONFIG_FILE")
-            config_profile = os.environ.get("OCI_PROFILE_NAME")
-            kwargs = {}
-            if config_file is not None:
-                kwargs["file_location"] = config_file
-            if config_profile is not None:
-                kwargs["profile_name"] = config_profile
-            _config = oci.config.from_file(**kwargs)
-            _usage_client = oci.usage_api.UsageapiClient(_config)
-            _search_client = oci.resource_search.ResourceSearchClient(_config)
-            _oci = oci
-        except Exception:
-            _oci = None
-            _config = None
-            _usage_client = None
-            _search_client = None
-            raise
-    return _oci, _config, _usage_client, _search_client
+    if profile_name in _clients_cache:
+        config, usage_client, search_client = _clients_cache[profile_name]
+        return _oci, config, usage_client, search_client
+
+    try:
+        config_file = os.environ.get("OCI_CONFIG_FILE")
+        kwargs = {"profile_name": profile_name}
+        if config_file is not None:
+            kwargs["file_location"] = config_file
+
+        config = _oci.config.from_file(**kwargs)
+        usage_client = _oci.usage_api.UsageapiClient(config)
+        search_client = _oci.resource_search.ResourceSearchClient(config)
+
+        _clients_cache[profile_name] = (config, usage_client, search_client)
+        return _oci, config, usage_client, search_client
+    except Exception:
+        # Don't cache failures
+        raise
 
 
 # ---------------------------------------------------------------------------
 # Business logic (adapted from the original CLI)
 # ---------------------------------------------------------------------------
 
-def _get_resource_name(ocid: str) -> str:
+def _get_resource_name(ocid: str, profile: str) -> str:
     """Look up a human-readable display name for an OCID."""
     try:
-        oci, config, _, search_client = _get_oci()
+        oci, config, _, search_client = _get_oci(profile)
         structured_search = oci.resource_search.models.StructuredSearchDetails(
             query=f"query all resources where identifier = '{ocid}'",
             type="Structured",
@@ -64,10 +63,10 @@ def _get_resource_name(ocid: str) -> str:
     return "N/A"
 
 
-def _get_resource_ocid(display_name: str) -> str:
+def _get_resource_ocid(display_name: str, profile: str) -> str:
     """Look up an OCID for a given human-readable display name."""
     try:
-        oci, config, _, search_client = _get_oci()
+        oci, config, _, search_client = _get_oci(profile)
         structured_search = oci.resource_search.models.StructuredSearchDetails(
             query=f"query all resources where displayName = '{display_name}'",
             type="Structured",
@@ -80,10 +79,10 @@ def _get_resource_ocid(display_name: str) -> str:
     return ""
 
 
-def _list_resource_types() -> str:
+def _list_resource_types(profile: str) -> str:
     """Return all monitorable resource types as a JSON string."""
-    oci, config, _, search_client = _get_oci()
     try:
+        oci, config, _, search_client = _get_oci(profile)
         types_response = search_client.list_resource_types()
         types_list = [t.name for t in sorted(types_response.data, key=lambda x: x.name)]
         return json.dumps({"resource_types": types_list}, indent=2)
@@ -95,11 +94,15 @@ def _fetch_usage_items(
     service_filter: str | None,
     include_resource_id: bool,
     days: int,
+    profile: str,
 ) -> tuple[list[Any], datetime, datetime] | str:
     """
     Shared pagination logic. Returns (items, start_date, end_date) or an error string.
     """
-    oci, config, usage_client, _ = _get_oci()
+    try:
+        oci, config, usage_client, _ = _get_oci(profile)
+    except Exception as e:
+        return f"OCI initialization error: {e}"
 
     end_date = datetime.utcnow()
     start_date = end_date - timedelta(days=days)
@@ -149,7 +152,7 @@ def _is_ocid(value: str) -> bool:
     return value.startswith("ocid1.") or value.startswith("ocid2.")
 
 
-def _resource_details(item: Any) -> tuple[str, str]:
+def _resource_details(item: Any, profile: str) -> tuple[str, str]:
     """Returns (display_name, ocid), looking up missing info if necessary."""
     rn = item.resource_name
     ri = item.resource_id
@@ -168,24 +171,24 @@ def _resource_details(item: Any) -> tuple[str, str]:
         display_name = ri
 
     if ocid and not display_name:
-        resolved = _get_resource_name(ocid)
+        resolved = _get_resource_name(ocid, profile)
         if resolved != "N/A":
             display_name = resolved
 
     if display_name and not ocid:
-        resolved = _get_resource_ocid(display_name)
+        resolved = _get_resource_ocid(display_name, profile)
         if resolved:
             ocid = resolved
 
     return display_name or "—", ocid or "—"
 
 
-def _get_usage_report(service_filter: str | None = None, days: int = 30) -> str:
+def _get_usage_report(service_filter: str | None = None, days: int = 30, profile: str = "DEFAULT") -> str:
     """
     Fetch cost/usage grouped by compartment, service, and SKU.
     Fast — no per-resource API calls. Returns JSON.
     """
-    result = _fetch_usage_items(service_filter, include_resource_id=False, days=days)
+    result = _fetch_usage_items(service_filter, include_resource_id=False, days=days, profile=profile)
     if isinstance(result, str):
         return json.dumps({"error": result})
     all_items, start_date, end_date = result
@@ -219,14 +222,14 @@ def _get_usage_report(service_filter: str | None = None, days: int = 30) -> str:
 
 
 def _get_usage_report_detailed(
-    service_filter: str | None = None, days: int = 30
+    service_filter: str | None = None, days: int = 30, profile: str = "DEFAULT"
 ) -> str:
     """
     Fetch cost/usage with per-resource detail. Returns JSON.
     Resource names come directly from the Usage API where available;
     OCIDs are resolved via Resource Search when needed.
     """
-    result = _fetch_usage_items(service_filter, include_resource_id=True, days=days)
+    result = _fetch_usage_items(service_filter, include_resource_id=True, days=days, profile=profile)
     if isinstance(result, str):
         return json.dumps({"error": result})
     all_items, start_date, end_date = result
@@ -248,7 +251,7 @@ def _get_usage_report_detailed(
     for item in all_items:
         cost = item.computed_amount or 0.0
         total_cost += cost
-        res_name, res_id = _resource_details(item)
+        res_name, res_id = _resource_details(item, profile)
         report["items"].append({
             "compartment_name": str(item.compartment_name),
             "service": str(item.service),
@@ -286,6 +289,14 @@ _SERVICE_SCHEMA = {
     ),
 }
 
+_PROFILE_SCHEMA = {
+    "type": "string",
+    "description": (
+        "Optional: OCI profile name from ~/.oci/config. "
+        "If not provided, uses OCI_PROFILE_NAME env var, then 'DEFAULT'."
+    ),
+}
+
 
 @server.list_tools()
 async def handle_list_tools() -> list[types.Tool]:
@@ -301,6 +312,7 @@ async def handle_list_tools() -> list[types.Tool]:
                 "properties": {
                     "service_filter": _SERVICE_SCHEMA,
                     "days": _DAYS_SCHEMA,
+                    "profile": _PROFILE_SCHEMA,
                 },
                 "required": [],
             },
@@ -318,6 +330,7 @@ async def handle_list_tools() -> list[types.Tool]:
                 "properties": {
                     "service_filter": _SERVICE_SCHEMA,
                     "days": _DAYS_SCHEMA,
+                    "profile": _PROFILE_SCHEMA,
                 },
                 "required": [],
             },
@@ -331,7 +344,9 @@ async def handle_list_tools() -> list[types.Tool]:
             ),
             inputSchema={
                 "type": "object",
-                "properties": {},
+                "properties": {
+                    "profile": _PROFILE_SCHEMA,
+                },
                 "required": [],
             },
         ),
@@ -342,19 +357,26 @@ async def handle_list_tools() -> list[types.Tool]:
 async def handle_call_tool(
     name: str, arguments: dict[str, Any]
 ) -> list[types.TextContent]:
+    profile = (
+        arguments.get("profile") or
+        os.environ.get("OCI_PROFILE_NAME") or
+        "DEFAULT"
+    )
     try:
         if name == "oci_usage_report":
             result = _get_usage_report(
                 service_filter=arguments.get("service_filter"),
                 days=int(arguments.get("days", 30)),
+                profile=profile,
             )
         elif name == "oci_usage_report_detailed":
             result = _get_usage_report_detailed(
                 service_filter=arguments.get("service_filter"),
                 days=int(arguments.get("days", 30)),
+                profile=profile,
             )
         elif name == "oci_list_resource_types":
-            result = _list_resource_types()
+            result = _list_resource_types(profile=profile)
         else:
             result = f"Unknown tool: {name}"
     except Exception as e:
