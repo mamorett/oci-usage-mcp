@@ -212,7 +212,7 @@ def _get_usage_report_detailed(
     if not all_items:
         return "No data found for the specified period / filter."
 
-lines = [
+    lines = [
         f"OCI Usage Report — Detailed  ({start_date.date()} → {end_date.date()})",
         f"{'Compartment':<30} | {'Service':<30} | {'Cost':>12} | {'Resource':<50} | Resource ID",
         "-" * 200,
