@@ -56,7 +56,11 @@ If your OCI config lives somewhere other than `~/.oci/config`, pass the path via
   "mcpServers": {
     "oci-usage": {
       "command": "uvx",
-      "args": ["oci-usage-mcp"],
+      "args": [
+        "--from",
+        "git+https://github.com/mamorett/oci-usage-mcp",
+        "oci-usage-mcp"
+      ],
       "env": {
         "OCI_CONFIG_FILE": "/path/to/your/oci/config",
         "OCI_PROFILE_NAME": "ADMIN"

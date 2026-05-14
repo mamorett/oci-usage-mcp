@@ -22,13 +22,20 @@ def _get_oci():
     if _oci is None:
         import oci  # noqa: PLC0415
 
-        _oci = oci
-        _config = oci.config.from_file(
-            file_location=os.environ.get("OCI_CONFIG_FILE"),
-            profile=os.environ.get("OCI_PROFILE_NAME"),
-        )
-        _usage_client = oci.usage_api.UsageapiClient(_config)
-        _search_client = oci.resource_search.ResourceSearchClient(_config)
+        try:
+            _config = oci.config.from_file(
+                file_location=os.environ.get("OCI_CONFIG_FILE"),
+                profile_name=os.environ.get("OCI_PROFILE_NAME"),
+            )
+            _usage_client = oci.usage_api.UsageapiClient(_config)
+            _search_client = oci.resource_search.ResourceSearchClient(_config)
+            _oci = oci
+        except Exception:
+            _oci = None
+            _config = None
+            _usage_client = None
+            _search_client = None
+            raise
     return _oci, _config, _usage_client, _search_client
 
 
