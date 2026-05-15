@@ -114,7 +114,7 @@ def _fetch_usage_items(
     if service_filter:
         filters.append(
             oci.usage_api.models.Filter(
-                operator="IN",
+                operator="AND",
                 dimensions=[
                     oci.usage_api.models.Dimension(key="service", value=service_filter)
                 ],
@@ -122,22 +122,17 @@ def _fetch_usage_items(
         )
         
     if compartments:
-        comp_filters = []
+        comp_dims = []
         for comp in compartments:
             key = "compartmentId" if _is_ocid(comp) else "compartmentName"
-            comp_filters.append(
-                oci.usage_api.models.Filter(
-                    operator="IN",
-                    dimensions=[oci.usage_api.models.Dimension(key=key, value=comp)]
-                )
-            )
-        if len(comp_filters) == 1:
-            filters.append(comp_filters[0])
-        else:
-            filters.append(oci.usage_api.models.Filter(
+            comp_dims.append(oci.usage_api.models.Dimension(key=key, value=comp))
+            
+        filters.append(
+            oci.usage_api.models.Filter(
                 operator="OR",
-                filters=comp_filters
-            ))
+                dimensions=comp_dims
+            )
+        )
 
     filter_config = None
     if len(filters) == 1:
