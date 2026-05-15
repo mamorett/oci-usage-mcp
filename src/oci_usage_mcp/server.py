@@ -3,12 +3,10 @@
 import json
 import os
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Annotated
+from pydantic import Field
 
-import mcp.server.stdio
-import mcp.types as types
-from mcp.server import NotificationOptions, Server
-from mcp.server.models import InitializationOptions
+from mcp.server.fastmcp import FastMCP
 
 # Lazy OCI imports and client cache
 _oci = None
@@ -92,6 +90,7 @@ def _list_resource_types(profile: str) -> str:
 
 def _fetch_usage_items(
     service_filter: str | None,
+    compartments: list[str] | None,
     include_resource_id: bool,
     days: int,
     profile: str,
@@ -111,13 +110,42 @@ def _fetch_usage_items(
     if include_resource_id:
         group_by.append("resourceId")
 
-    filter_config = None
+    filters = []
     if service_filter:
+        filters.append(
+            oci.usage_api.models.Filter(
+                operator="IN",
+                dimensions=[
+                    oci.usage_api.models.Dimension(key="service", value=service_filter)
+                ],
+            )
+        )
+        
+    if compartments:
+        comp_filters = []
+        for comp in compartments:
+            key = "compartmentId" if _is_ocid(comp) else "compartmentName"
+            comp_filters.append(
+                oci.usage_api.models.Filter(
+                    operator="IN",
+                    dimensions=[oci.usage_api.models.Dimension(key=key, value=comp)]
+                )
+            )
+        if len(comp_filters) == 1:
+            filters.append(comp_filters[0])
+        else:
+            filters.append(oci.usage_api.models.Filter(
+                operator="OR",
+                filters=comp_filters
+            ))
+
+    filter_config = None
+    if len(filters) == 1:
+        filter_config = filters[0]
+    elif len(filters) > 1:
         filter_config = oci.usage_api.models.Filter(
-            operator="IN",
-            dimensions=[
-                oci.usage_api.models.Dimension(key="service", value=service_filter)
-            ],
+            operator="AND",
+            filters=filters
         )
 
     all_items: list[Any] = []
@@ -183,12 +211,12 @@ def _resource_details(item: Any, profile: str) -> tuple[str, str]:
     return display_name or "—", ocid or "—"
 
 
-def _get_usage_report(service_filter: str | None = None, days: int = 30, profile: str = "DEFAULT") -> str:
+def _get_usage_report(service_filter: str | None = None, compartments: list[str] | None = None, days: int = 30, profile: str = "DEFAULT") -> str:
     """
     Fetch cost/usage grouped by compartment, service, and SKU.
     Fast — no per-resource API calls. Returns JSON.
     """
-    result = _fetch_usage_items(service_filter, include_resource_id=False, days=days, profile=profile)
+    result = _fetch_usage_items(service_filter, compartments, include_resource_id=False, days=days, profile=profile)
     if isinstance(result, str):
         return json.dumps({"error": result})
     all_items, start_date, end_date = result
@@ -222,14 +250,14 @@ def _get_usage_report(service_filter: str | None = None, days: int = 30, profile
 
 
 def _get_usage_report_detailed(
-    service_filter: str | None = None, days: int = 30, profile: str = "DEFAULT"
+    service_filter: str | None = None, compartments: list[str] | None = None, days: int = 30, profile: str = "DEFAULT"
 ) -> str:
     """
     Fetch cost/usage with per-resource detail. Returns JSON.
     Resource names come directly from the Usage API where available;
     OCIDs are resolved via Resource Search when needed.
     """
-    result = _fetch_usage_items(service_filter, include_resource_id=True, days=days, profile=profile)
+    result = _fetch_usage_items(service_filter, compartments, include_resource_id=True, days=days, profile=profile)
     if isinstance(result, str):
         return json.dumps({"error": result})
     all_items, start_date, end_date = result
@@ -269,120 +297,75 @@ def _get_usage_report_detailed(
 # MCP server definition
 # ---------------------------------------------------------------------------
 
-server = Server("oci-usage-mcp")
+mcp = FastMCP("oci-usage-mcp")
 
 
-_DAYS_SCHEMA = {
-    "type": "integer",
-    "description": "Number of days back to query. Defaults to 30.",
-    "default": 30,
-    "minimum": 1,
-    "maximum": 365,
-}
+@mcp.tool()
+def oci_usage_report(
+    service_filter: str | None = None,
+    compartments: list[str] | None = None,
+    days: Annotated[int, Field(ge=1, le=365)] = 30,
+    profile: str | None = None,
+) -> str:
+    """
+    Fetch OCI cost and usage data grouped by compartment, service, and SKU.
+    Fast — no per-resource lookups. Use this for a quick cost overview.
 
-_SERVICE_SCHEMA = {
-    "type": "string",
-    "description": (
-        "Optional: filter results to a specific OCI service name, "
-        "e.g. 'Compute', 'Object Storage', 'Database'. "
-        "Use oci_list_resource_types to discover valid names."
-    ),
-}
-
-_PROFILE_SCHEMA = {
-    "type": "string",
-    "description": (
-        "Optional: OCI profile name from ~/.oci/config. "
-        "If not provided, uses OCI_PROFILE_NAME env var, then 'DEFAULT'."
-    ),
-}
-
-
-@server.list_tools()
-async def handle_list_tools() -> list[types.Tool]:
-    return [
-        types.Tool(
-            name="oci_usage_report",
-            description=(
-                "Fetch OCI cost and usage data grouped by compartment, service, and SKU. "
-                "Fast — no per-resource lookups. Use this for a quick cost overview."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "service_filter": _SERVICE_SCHEMA,
-                    "days": _DAYS_SCHEMA,
-                    "profile": _PROFILE_SCHEMA,
-                },
-                "required": [],
-            },
-        ),
-        types.Tool(
-            name="oci_usage_report_detailed",
-            description=(
-                "Fetch OCI cost and usage data with full per-resource detail: resolves "
-                "each resource OCID to its human-readable display name via the Resource "
-                "Search API. Slower than oci_usage_report — use when you need to identify "
-                "specific resources driving costs."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "service_filter": _SERVICE_SCHEMA,
-                    "days": _DAYS_SCHEMA,
-                    "profile": _PROFILE_SCHEMA,
-                },
-                "required": [],
-            },
-        ),
-        types.Tool(
-            name="oci_list_resource_types",
-            description=(
-                "List all OCI resource types that can be monitored / searched via the "
-                "Resource Search API. Useful for discovering valid service names to pass "
-                "as service_filter in the other tools."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "profile": _PROFILE_SCHEMA,
-                },
-                "required": [],
-            },
-        ),
-    ]
-
-
-@server.call_tool()
-async def handle_call_tool(
-    name: str, arguments: dict[str, Any]
-) -> list[types.TextContent]:
-    profile = (
-        arguments.get("profile") or
-        os.environ.get("OCI_PROFILE_NAME") or
-        "DEFAULT"
+    Args:
+        service_filter: Optional filter results to a specific OCI service name, e.g. 'Compute', 'Object Storage', 'Database'. Use oci_list_resource_types to discover valid names.
+        compartments: Optional limit the returned data to a single or list of compartments. You can provide compartment names or OCIDs. If not provided, data for the entire tenancy is returned.
+        days: Number of days back to query. Defaults to 30.
+        profile: Optional OCI profile name from ~/.oci/config. If not provided, uses OCI_PROFILE_NAME env var, then 'DEFAULT'.
+    """
+    resolved_profile = profile or os.environ.get("OCI_PROFILE_NAME") or "DEFAULT"
+    return _get_usage_report(
+        service_filter=service_filter,
+        compartments=compartments,
+        days=days,
+        profile=resolved_profile,
     )
-    try:
-        if name == "oci_usage_report":
-            result = _get_usage_report(
-                service_filter=arguments.get("service_filter"),
-                days=int(arguments.get("days", 30)),
-                profile=profile,
-            )
-        elif name == "oci_usage_report_detailed":
-            result = _get_usage_report_detailed(
-                service_filter=arguments.get("service_filter"),
-                days=int(arguments.get("days", 30)),
-                profile=profile,
-            )
-        elif name == "oci_list_resource_types":
-            result = _list_resource_types(profile=profile)
-        else:
-            result = f"Unknown tool: {name}"
-    except Exception as e:
-        result = f"Error: {e}"
 
-    return [types.TextContent(type="text", text=result)]
+
+@mcp.tool()
+def oci_usage_report_detailed(
+    service_filter: str | None = None,
+    compartments: list[str] | None = None,
+    days: Annotated[int, Field(ge=1, le=365)] = 30,
+    profile: str | None = None,
+) -> str:
+    """
+    Fetch OCI cost and usage data with full per-resource detail: resolves
+    each resource OCID to its human-readable display name via the Resource
+    Search API. Slower than oci_usage_report — use when you need to identify
+    specific resources driving costs.
+
+    Args:
+        service_filter: Optional filter results to a specific OCI service name, e.g. 'Compute', 'Object Storage', 'Database'. Use oci_list_resource_types to discover valid names.
+        compartments: Optional limit the returned data to a single or list of compartments. You can provide compartment names or OCIDs. If not provided, data for the entire tenancy is returned.
+        days: Number of days back to query. Defaults to 30.
+        profile: Optional OCI profile name from ~/.oci/config. If not provided, uses OCI_PROFILE_NAME env var, then 'DEFAULT'.
+    """
+    resolved_profile = profile or os.environ.get("OCI_PROFILE_NAME") or "DEFAULT"
+    return _get_usage_report_detailed(
+        service_filter=service_filter,
+        compartments=compartments,
+        days=days,
+        profile=resolved_profile,
+    )
+
+
+@mcp.tool()
+def oci_list_resource_types(profile: str | None = None) -> str:
+    """
+    List all OCI resource types that can be monitored / searched via the
+    Resource Search API. Useful for discovering valid service names to pass
+    as service_filter in the other tools.
+
+    Args:
+        profile: Optional OCI profile name from ~/.oci/config. If not provided, uses OCI_PROFILE_NAME env var, then 'DEFAULT'.
+    """
+    resolved_profile = profile or os.environ.get("OCI_PROFILE_NAME") or "DEFAULT"
+    return _list_resource_types(profile=resolved_profile)
 
 
 # ---------------------------------------------------------------------------
@@ -390,24 +373,7 @@ async def handle_call_tool(
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    import asyncio
-
-    async def _run():
-        async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
-            await server.run(
-                read_stream,
-                write_stream,
-                InitializationOptions(
-                    server_name="oci-usage-mcp",
-                    server_version="0.1.0",
-                    capabilities=server.get_capabilities(
-                        notification_options=NotificationOptions(),
-                        experimental_capabilities={},
-                    ),
-                ),
-            )
-
-    asyncio.run(_run())
+    mcp.run()
 
 
 if __name__ == "__main__":
