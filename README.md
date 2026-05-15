@@ -62,6 +62,7 @@ Fetch cost and usage data grouped by compartment, service, and SKU. Fast and eff
 | :--- | :--- | :--- | :--- |
 | `days` | `int` | `30` | Number of days to query (max 365). |
 | `service_filter` | `str` | `null` | Filter by service (e.g., "Compute", "Database"). |
+| `compartments` | `list[str]` | `null` | Limit data to a single or list of compartment names or OCIDs. |
 | `profile` | `str` | `null` | **Dynamic Profile**: Override default OCI profile. |
 
 ### 2. `oci_usage_report_detailed`
@@ -71,6 +72,7 @@ Full per-resource detail. Resolves OCIDs to display names using Resource Search.
 | :--- | :--- | :--- | :--- |
 | `days` | `int` | `30` | Number of days to query. |
 | `service_filter` | `str` | `null` | Filter by service. |
+| `compartments` | `list[str]` | `null` | Limit data to a single or list of compartment names or OCIDs. |
 | `profile` | `str` | `null` | **Dynamic Profile**: Override default OCI profile. |
 
 ### 3. `oci_list_resource_types`
