@@ -3,7 +3,8 @@
 import json
 import os
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Annotated
+from pydantic import Field
 
 from mcp.server.fastmcp import FastMCP
 
@@ -303,7 +304,7 @@ mcp = FastMCP("oci-usage-mcp")
 def oci_usage_report(
     service_filter: str | None = None,
     compartments: list[str] | None = None,
-    days: int = 30,
+    days: Annotated[int, Field(ge=1, le=365)] = 30,
     profile: str | None = None,
 ) -> str:
     """
@@ -329,7 +330,7 @@ def oci_usage_report(
 def oci_usage_report_detailed(
     service_filter: str | None = None,
     compartments: list[str] | None = None,
-    days: int = 30,
+    days: Annotated[int, Field(ge=1, le=365)] = 30,
     profile: str | None = None,
 ) -> str:
     """
